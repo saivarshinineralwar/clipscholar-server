@@ -16,7 +16,6 @@ FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
 
 def time_to_seconds(t):
-    """Convert HH:MM:SS / MM:SS / SS (string or number) to seconds (float)."""
     if isinstance(t, (int, float)):
         return float(t)
     t = str(t).strip()
@@ -37,7 +36,6 @@ def safe_filename(text, max_len=40):
 
 
 def parse_segments_text(text):
-    """Pull topic/from/to out of the AI's plain text segmentation output."""
     pattern = (
         r"Topic title:\s*(.+?),\s*"
         r"From time:\s*([\d:]+),\s*"
@@ -56,29 +54,27 @@ def health():
 
 @app.route("/process", methods=["POST"])
 def process_video():
-    """
-    Accepts JSON body with EITHER:
-      {"youtube_url": "...", "segments_text": "<raw AI segmentation output>"}
-    OR:
-      {"youtube_url": "...", "segments": [{"title": "...", "from": "0:00", "to": "1:30"}, ...]}
-    """
-    data = request.get_json(force=True, silent=True) or {}
-    youtube_url = data.get("youtube_url")
+    # Accept EITHER form data OR JSON — this handles Make.com's encoding automatically
+    if request.content_type and "application/json" in request.content_type:
+        data = request.get_json(force=True, silent=True) or {}
+    else:
+        # form/multipart — Make.com sends this when body input method is "Data Structure"
+        data = request.form.to_dict()
+
+    youtube_url = data.get("youtube_url", "").strip()
+    segments_text = data.get("segments_text", "").strip()
 
     if not youtube_url:
         return jsonify({"error": "youtube_url is required"}), 400
 
-    segments = data.get("segments")
-    if not segments and data.get("segments_text"):
-        segments = parse_segments_text(data["segments_text"])
+    segments = parse_segments_text(segments_text)
 
     if not segments:
-        return jsonify({"error": "Could not find any segments (provide 'segments' or 'segments_text')"}), 400
+        return jsonify({"error": "Could not parse segments from segments_text", "received": segments_text[:200]}), 400
 
     job_id = uuid.uuid4().hex[:10]
     source_path = os.path.join("/tmp", f"{job_id}_source.mp4")
 
-    # 1. Download the video with yt-dlp (reliable, no async polling needed)
     ydl_opts = {
         "format": "best[ext=mp4][height<=480]/best[height<=480]/best",
         "outtmpl": source_path,
@@ -102,7 +98,6 @@ def process_video():
     if not os.path.exists(source_path):
         return jsonify({"error": "Downloaded file not found"}), 500
 
-    # 2. Cut each segment with ffmpeg
     clips = []
     for i, seg in enumerate(segments):
         title = seg.get("title", f"Segment {i + 1}")
@@ -128,20 +123,9 @@ def process_video():
 
         if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
             clip_url = request.host_url.rstrip("/") + f"/clips/{clip_filename}"
-            clips.append({
-                "title": title,
-                "from": seg.get("from"),
-                "to": seg.get("to"),
-                "url": clip_url,
-            })
+            clips.append({"title": title, "from": seg.get("from"), "to": seg.get("to"), "url": clip_url})
         else:
-            clips.append({
-                "title": title,
-                "from": seg.get("from"),
-                "to": seg.get("to"),
-                "error": "ffmpeg failed to create this clip",
-                "details": result.stderr[-300:],
-            })
+            clips.append({"title": title, "from": seg.get("from"), "to": seg.get("to"), "error": "ffmpeg failed", "details": result.stderr[-200:]})
 
     try:
         os.remove(source_path)
