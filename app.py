@@ -52,17 +52,22 @@ def health():
     return jsonify({"status": "ok", "message": "ClipScholar video cutter is running"})
 
 
-@app.route("/process", methods=["POST"])
+@app.route("/process", methods=["GET", "POST"])
 def process_video():
-    # Accept EITHER form data OR JSON — this handles Make.com's encoding automatically
-    if request.content_type and "application/json" in request.content_type:
-        data = request.get_json(force=True, silent=True) or {}
-    else:
-        # form/multipart — Make.com sends this when body input method is "Data Structure"
-        data = request.form.to_dict()
+    # Get youtube_url and segments_text from ANY source:
+    # query params, form data, or JSON body
+    youtube_url = (
+        request.args.get("youtube_url") or
+        request.form.get("youtube_url") or
+        (request.get_json(silent=True) or {}).get("youtube_url", "")
+    ).strip()
 
-    youtube_url = data.get("youtube_url", "").strip()
-    segments_text = data.get("segments_text", "").strip()
+    segments_text = (
+        request.args.get("segments_text") or
+        request.form.get("segments_text") or
+        (request.get_json(silent=True) or {}).get("segments_text") or
+        request.get_data(as_text=True)
+    ).strip()
 
     if not youtube_url:
         return jsonify({"error": "youtube_url is required"}), 400
@@ -70,7 +75,11 @@ def process_video():
     segments = parse_segments_text(segments_text)
 
     if not segments:
-        return jsonify({"error": "Could not parse segments from segments_text", "received": segments_text[:200]}), 400
+        return jsonify({
+            "error": "Could not parse segments",
+            "received_length": len(segments_text),
+            "preview": segments_text[:300]
+        }), 400
 
     job_id = uuid.uuid4().hex[:10]
     source_path = os.path.join("/tmp", f"{job_id}_source.mp4")
@@ -125,7 +134,7 @@ def process_video():
             clip_url = request.host_url.rstrip("/") + f"/clips/{clip_filename}"
             clips.append({"title": title, "from": seg.get("from"), "to": seg.get("to"), "url": clip_url})
         else:
-            clips.append({"title": title, "from": seg.get("from"), "to": seg.get("to"), "error": "ffmpeg failed", "details": result.stderr[-200:]})
+            clips.append({"title": title, "error": "ffmpeg failed", "details": result.stderr[-200:]})
 
     try:
         os.remove(source_path)
