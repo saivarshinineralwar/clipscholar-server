@@ -36,14 +36,37 @@ def safe_filename(text, max_len=40):
 
 
 def parse_segments_text(text):
-    pattern = (
+    segments = []
+
+    # Pattern 1: "Topic title: X, From time: Y, To time: Z"
+    pattern1 = (
         r"Topic title:\s*(.+?),\s*"
         r"From time:\s*([\d:]+),\s*"
         r"To time:\s*([\d:]+)"
     )
-    segments = []
-    for title, from_str, to_str in re.findall(pattern, text):
-        segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
+    matches = re.findall(pattern1, text)
+    if matches:
+        for title, from_str, to_str in matches:
+            segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
+        return segments
+
+    # Pattern 2: "Segment#, Title, from_time, to_time, Summary"
+    # e.g. "1, Runner's knee, 0:01, 0:12, Pain behind..."
+    pattern2 = r"\d+,\s*(.+?),\s*([\d:]+),\s*([\d:]+)"
+    matches = re.findall(pattern2, text)
+    if matches:
+        for title, from_str, to_str in matches:
+            segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
+        return segments
+
+    # Pattern 3: lines like "From: 0:01 To: 0:12 Topic: Runner's knee"
+    pattern3 = r"From[:\s]+([\d:]+)[,\s]+To[:\s]+([\d:]+)[,\s]+(?:Topic[:\s]+)?(.+)"
+    matches = re.findall(pattern3, text, re.IGNORECASE)
+    if matches:
+        for from_str, to_str, title in matches:
+            segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
+        return segments
+
     return segments
 
 
@@ -54,8 +77,6 @@ def health():
 
 @app.route("/process", methods=["GET", "POST"])
 def process_video():
-    # Get youtube_url and segments_text from ANY source:
-    # query params, form data, or JSON body
     youtube_url = (
         request.args.get("youtube_url") or
         request.form.get("youtube_url") or
@@ -77,7 +98,6 @@ def process_video():
     if not segments:
         return jsonify({
             "error": "Could not parse segments",
-            "received_length": len(segments_text),
             "preview": segments_text[:300]
         }), 400
 
