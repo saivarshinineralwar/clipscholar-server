@@ -2,21 +2,23 @@ import os
 import re
 import uuid
 import subprocess
-import tempfile
-
+ 
 from flask import Flask, request, jsonify, send_from_directory
 import yt_dlp
 import imageio_ffmpeg
-
+ 
 app = Flask(__name__)
-
+ 
 CLIPS_DIR = "clips"
 os.makedirs(CLIPS_DIR, exist_ok=True)
-
+ 
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
-YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "")
-
-
+ 
+# Look for cookies.txt in the same directory as this file
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
+ 
+ 
 def time_to_seconds(t):
     if isinstance(t, (int, float)):
         return float(t)
@@ -29,17 +31,17 @@ def time_to_seconds(t):
         m, s = parts
         return m * 60 + s
     return parts[0]
-
-
+ 
+ 
 def safe_filename(text, max_len=40):
     text = re.sub(r"[^a-zA-Z0-9_\- ]", "", text or "")
     text = text.strip().replace(" ", "_")
     return text[:max_len] if text else "clip"
-
-
+ 
+ 
 def parse_segments_text(text):
     segments = []
-
+ 
     # Primary: SEGMENT|Title|0:00|1:30
     pattern1 = r"SEGMENT\|(.+?)\|([\d:]+)\|([\d:]+)"
     matches = re.findall(pattern1, text)
@@ -47,7 +49,7 @@ def parse_segments_text(text):
         for title, from_str, to_str in matches:
             segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
         return segments
-
+ 
     # Fallback 1: "Topic title: X, From time: Y, To time: Z"
     pattern2 = r"Topic title:\s*(.+?),\s*From time:\s*([\d:]+),\s*To time:\s*([\d:]+)"
     matches = re.findall(pattern2, text)
@@ -55,7 +57,7 @@ def parse_segments_text(text):
         for title, from_str, to_str in matches:
             segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
         return segments
-
+ 
     # Fallback 2: "1, Topic: X, From timestamp: Y, To timestamp: Z"
     pattern3 = r"\d+,\s*Topic:\s*(.+?),\s*From timestamp:\s*([\d:]+),\s*To timestamp:\s*([\d:]+)"
     matches = re.findall(pattern3, text)
@@ -63,7 +65,7 @@ def parse_segments_text(text):
         for title, from_str, to_str in matches:
             segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
         return segments
-
+ 
     # Fallback 3: "1, Topic: X, From: Y, To: Z"
     pattern4 = r"\d+,\s*Topic:\s*(.+?),\s*From:\s*([\d:]+),\s*To:\s*([\d:]+)"
     matches = re.findall(pattern4, text)
@@ -71,12 +73,11 @@ def parse_segments_text(text):
         for title, from_str, to_str in matches:
             segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
         return segments
-
+ 
     return segments
-
-
+ 
+ 
 def download_video(youtube_url, output_path):
-    """Download using yt-dlp with cookies from environment variable."""
     ydl_opts = {
         "format": "best[ext=mp4][height<=480]/best[height<=480]/best",
         "outtmpl": output_path,
@@ -84,31 +85,20 @@ def download_video(youtube_url, output_path):
         "no_warnings": True,
         "merge_output_format": "mp4",
     }
-
-    # Write cookies to a temp file if available
-    if YOUTUBE_COOKIES:
-        cookies_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-        cookies_file.write(YOUTUBE_COOKIES)
-        cookies_file.close()
-        ydl_opts["cookiefile"] = cookies_file.name
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([youtube_url])
-    finally:
-        if YOUTUBE_COOKIES and 'cookiefile' in ydl_opts:
-            try:
-                os.unlink(ydl_opts["cookiefile"])
-            except OSError:
-                pass
-
-
+ 
+    if os.path.exists(COOKIES_FILE):
+        ydl_opts["cookiefile"] = COOKIES_FILE
+ 
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([youtube_url])
+ 
+ 
 @app.route("/", methods=["GET"])
 def health():
-    cookies_status = "loaded" if YOUTUBE_COOKIES else "missing"
+    cookies_status = "loaded" if os.path.exists(COOKIES_FILE) else "missing"
     return jsonify({"status": "ok", "message": "ClipScholar video cutter is running", "cookies": cookies_status})
-
-
+ 
+ 
 @app.route("/process", methods=["GET", "POST"])
 def process_video():
     youtube_url = (
@@ -116,43 +106,43 @@ def process_video():
         request.form.get("youtube_url") or
         (request.get_json(silent=True) or {}).get("youtube_url", "")
     ).strip()
-
+ 
     segments_text = (
         request.args.get("segments_text") or
         request.form.get("segments_text") or
         (request.get_json(silent=True) or {}).get("segments_text") or
         request.get_data(as_text=True)
     ).strip()
-
+ 
     if not youtube_url:
         return jsonify({"error": "youtube_url is required"}), 400
-
+ 
     segments = parse_segments_text(segments_text)
-
+ 
     if not segments:
         return jsonify({"error": "Could not parse segments", "preview": segments_text[:300]}), 400
-
+ 
     job_id = uuid.uuid4().hex[:10]
     source_path = os.path.join("/tmp", f"{job_id}_source.mp4")
-
+ 
     try:
         download_video(youtube_url, source_path)
     except Exception as e:
         return jsonify({"error": f"Failed to download video: {str(e)}"}), 500
-
+ 
     if not os.path.exists(source_path):
         return jsonify({"error": "Downloaded file not found"}), 500
-
+ 
     clips = []
     for i, seg in enumerate(segments):
         title = seg.get("title", f"Segment {i + 1}")
         start = time_to_seconds(seg.get("from", 0))
         end = time_to_seconds(seg.get("to", start + 1))
         duration = max(end - start, 0.5)
-
+ 
         clip_filename = f"{job_id}_{i + 1}_{safe_filename(title)}.mp4"
         clip_path = os.path.join(CLIPS_DIR, clip_filename)
-
+ 
         cmd = [
             FFMPEG_PATH, "-y",
             "-ss", str(start),
@@ -163,31 +153,31 @@ def process_video():
             "-preset", "veryfast",
             clip_path,
         ]
-
+ 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-
+ 
         if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
             clip_url = request.host_url.rstrip("/") + f"/clips/{clip_filename}"
             clips.append({"title": title, "from": seg.get("from"), "to": seg.get("to"), "url": clip_url})
         else:
             clips.append({"title": title, "error": "ffmpeg failed", "details": result.stderr[-200:]})
-
+ 
     try:
         os.remove(source_path)
     except OSError:
         pass
-
+ 
     if not any("url" in c for c in clips):
         return jsonify({"error": "No clips could be generated", "details": clips}), 500
-
+ 
     return jsonify({"job_id": job_id, "clips": clips})
-
-
+ 
+ 
 @app.route("/clips/<filename>", methods=["GET"])
 def serve_clip(filename):
     return send_from_directory(CLIPS_DIR, filename, as_attachment=False)
-
-
+ 
+ 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
