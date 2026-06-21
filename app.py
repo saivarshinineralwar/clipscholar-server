@@ -4,7 +4,8 @@ import uuid
 import subprocess
 
 from flask import Flask, request, jsonify, send_from_directory
-import yt_dlp
+from pytubefix import YouTube
+from pytubefix.cli import on_progress
 import imageio_ffmpeg
 
 app = Flask(__name__)
@@ -50,8 +51,7 @@ def parse_segments_text(text):
             segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
         return segments
 
-    # Pattern 2: "Segment#, Title, from_time, to_time, Summary"
-    # e.g. "1, Runner's knee, 0:01, 0:12, Pain behind..."
+    # Pattern 2: "1, Title, from_time, to_time, Summary"
     pattern2 = r"\d+,\s*(.+?),\s*([\d:]+),\s*([\d:]+)"
     matches = re.findall(pattern2, text)
     if matches:
@@ -59,15 +59,29 @@ def parse_segments_text(text):
             segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
         return segments
 
-    # Pattern 3: lines like "From: 0:01 To: 0:12 Topic: Runner's knee"
-    pattern3 = r"From[:\s]+([\d:]+)[,\s]+To[:\s]+([\d:]+)[,\s]+(?:Topic[:\s]+)?(.+)"
-    matches = re.findall(pattern3, text, re.IGNORECASE)
-    if matches:
-        for from_str, to_str, title in matches:
-            segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
-        return segments
-
     return segments
+
+
+def download_video(youtube_url, output_path):
+    """Download YouTube video using pytubefix."""
+    yt = YouTube(youtube_url, on_progress_callback=on_progress, use_oauth=False, allow_oauth_cache=False)
+    
+    # Get the best progressive stream (video+audio in one file) up to 480p
+    stream = (
+        yt.streams.filter(progressive=True, file_extension="mp4")
+        .order_by("resolution")
+        .desc()
+        .first()
+    )
+    
+    if not stream:
+        raise Exception("No suitable video stream found")
+    
+    # Download to temp directory
+    tmp_dir = os.path.dirname(output_path)
+    filename = os.path.basename(output_path)
+    stream.download(output_path=tmp_dir, filename=filename)
+    return output_path
 
 
 @app.route("/", methods=["GET"])
@@ -104,25 +118,10 @@ def process_video():
     job_id = uuid.uuid4().hex[:10]
     source_path = os.path.join("/tmp", f"{job_id}_source.mp4")
 
-    ydl_opts = {
-        "format": "best[ext=mp4][height<=480]/best[height<=480]/best",
-        "outtmpl": source_path,
-        "quiet": True,
-        "no_warnings": True,
-        "merge_output_format": "mp4",
-    }
-
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([youtube_url])
+        download_video(youtube_url, source_path)
     except Exception as e:
         return jsonify({"error": f"Failed to download video: {str(e)}"}), 500
-
-    if not os.path.exists(source_path):
-        for f in os.listdir("/tmp"):
-            if f.startswith(f"{job_id}_source"):
-                source_path = os.path.join("/tmp", f)
-                break
 
     if not os.path.exists(source_path):
         return jsonify({"error": "Downloaded file not found"}), 500
