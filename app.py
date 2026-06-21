@@ -2,10 +2,10 @@ import os
 import re
 import uuid
 import subprocess
+import tempfile
 
 from flask import Flask, request, jsonify, send_from_directory
-from pytubefix import YouTube
-from pytubefix.cli import on_progress
+import yt_dlp
 import imageio_ffmpeg
 
 app = Flask(__name__)
@@ -14,6 +14,7 @@ CLIPS_DIR = "clips"
 os.makedirs(CLIPS_DIR, exist_ok=True)
 
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "")
 
 
 def time_to_seconds(t):
@@ -39,7 +40,7 @@ def safe_filename(text, max_len=40):
 def parse_segments_text(text):
     segments = []
 
-    # Primary format: SEGMENT|Title|0:00|1:30
+    # Primary: SEGMENT|Title|0:00|1:30
     pattern1 = r"SEGMENT\|(.+?)\|([\d:]+)\|([\d:]+)"
     matches = re.findall(pattern1, text)
     if matches:
@@ -75,24 +76,37 @@ def parse_segments_text(text):
 
 
 def download_video(youtube_url, output_path):
-    yt = YouTube(youtube_url, on_progress_callback=on_progress, use_oauth=False, allow_oauth_cache=False)
-    stream = (
-        yt.streams.filter(progressive=True, file_extension="mp4")
-        .order_by("resolution")
-        .desc()
-        .first()
-    )
-    if not stream:
-        raise Exception("No suitable video stream found")
-    tmp_dir = os.path.dirname(output_path)
-    filename = os.path.basename(output_path)
-    stream.download(output_path=tmp_dir, filename=filename)
-    return output_path
+    """Download using yt-dlp with cookies from environment variable."""
+    ydl_opts = {
+        "format": "best[ext=mp4][height<=480]/best[height<=480]/best",
+        "outtmpl": output_path,
+        "quiet": True,
+        "no_warnings": True,
+        "merge_output_format": "mp4",
+    }
+
+    # Write cookies to a temp file if available
+    if YOUTUBE_COOKIES:
+        cookies_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+        cookies_file.write(YOUTUBE_COOKIES)
+        cookies_file.close()
+        ydl_opts["cookiefile"] = cookies_file.name
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([youtube_url])
+    finally:
+        if YOUTUBE_COOKIES and 'cookiefile' in ydl_opts:
+            try:
+                os.unlink(ydl_opts["cookiefile"])
+            except OSError:
+                pass
 
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "message": "ClipScholar video cutter is running"})
+    cookies_status = "loaded" if YOUTUBE_COOKIES else "missing"
+    return jsonify({"status": "ok", "message": "ClipScholar video cutter is running", "cookies": cookies_status})
 
 
 @app.route("/process", methods=["GET", "POST"])
