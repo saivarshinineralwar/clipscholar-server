@@ -1,4 +1,4 @@
 flask
-pytubefix
+yt-dlp
 imageio-ffmpeg
 gunicorn
