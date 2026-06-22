@@ -14,7 +14,6 @@ os.makedirs(CLIPS_DIR, exist_ok=True)
  
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
  
-# Look for cookies.txt in the same directory as this file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
  
@@ -42,7 +41,6 @@ def safe_filename(text, max_len=40):
 def parse_segments_text(text):
     segments = []
  
-    # Primary: SEGMENT|Title|0:00|1:30
     pattern1 = r"SEGMENT\|(.+?)\|([\d:]+)\|([\d:]+)"
     matches = re.findall(pattern1, text)
     if matches:
@@ -50,7 +48,6 @@ def parse_segments_text(text):
             segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
         return segments
  
-    # Fallback 1: "Topic title: X, From time: Y, To time: Z"
     pattern2 = r"Topic title:\s*(.+?),\s*From time:\s*([\d:]+),\s*To time:\s*([\d:]+)"
     matches = re.findall(pattern2, text)
     if matches:
@@ -58,7 +55,6 @@ def parse_segments_text(text):
             segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
         return segments
  
-    # Fallback 2: "1, Topic: X, From timestamp: Y, To timestamp: Z"
     pattern3 = r"\d+,\s*Topic:\s*(.+?),\s*From timestamp:\s*([\d:]+),\s*To timestamp:\s*([\d:]+)"
     matches = re.findall(pattern3, text)
     if matches:
@@ -66,7 +62,6 @@ def parse_segments_text(text):
             segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
         return segments
  
-    # Fallback 3: "1, Topic: X, From: Y, To: Z"
     pattern4 = r"\d+,\s*Topic:\s*(.+?),\s*From:\s*([\d:]+),\s*To:\s*([\d:]+)"
     matches = re.findall(pattern4, text)
     if matches:
@@ -79,11 +74,12 @@ def parse_segments_text(text):
  
 def download_video(youtube_url, output_path):
     ydl_opts = {
-        "format": "best[ext=mp4][height<=480]/best[height<=480]/best",
+        "format": "18/best[ext=mp4][height<=480]/best[height<=480]/best",
         "outtmpl": output_path,
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": False,
+        "no_warnings": False,
         "merge_output_format": "mp4",
+        "extractor_args": {"youtube": {"skip": ["dash", "hls"]}},
     }
  
     if os.path.exists(COOKIES_FILE):
@@ -181,3 +177,5 @@ def serve_clip(filename):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+ 
+
