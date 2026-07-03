@@ -3,6 +3,7 @@ import re
 import uuid
 import subprocess
 import threading
+import requests
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -165,7 +166,16 @@ def job_status(job_id):
 @app.route("/clips/<filename>", methods=["GET"])
 def serve_clip(filename):
     return send_from_directory(CLIPS_DIR, filename, as_attachment=False)
-
+    
+@app.route("/transcribe", methods=["GET"])
+def transcribe():
+    youtube_url = request.args.get("youtube_url", "").strip()
+    if not youtube_url:
+        return jsonify({"error": "youtube_url required"}), 400
+    
+    MAKE_WEBHOOK = "https://hook.eu1.make.com/tcdmsacq1uyhuerysqwkwfwa4fm7t7gd"
+    response = requests.get(f"{MAKE_WEBHOOK}?audio_url={youtube_url}", timeout=300)
+    return response.text, response.status_code, {"Content-Type": "application/json"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
