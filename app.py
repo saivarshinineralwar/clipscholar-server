@@ -9,6 +9,7 @@ from flask_cors import CORS
 import yt_dlp
 import imageio_ffmpeg
 import assemblyai as aai
+from groq import Groq
 
 def load_env():
     for name in [".env", "config.env"]:
@@ -25,12 +26,12 @@ def load_env():
 load_env()
 
 ASSEMBLYAI_KEY = os.environ.get("ASSEMBLYAI_API_KEY", "")
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
+
 aai.settings.api_key = ASSEMBLYAI_KEY
 
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 FFMPEG_DIR = os.path.dirname(FFMPEG_PATH)
-
-# Add ffmpeg to PATH so yt-dlp can find it
 os.environ["PATH"] = FFMPEG_DIR + os.pathsep + os.environ.get("PATH", "")
 
 app = Flask(__name__)
@@ -88,12 +89,45 @@ def parse_segments(text):
     return segments
 
 
+def segment_with_groq(transcript_text):
+    client = Groq(api_key=GROQ_KEY)
+    response = client.chat.completions.create(
+        model="llama3-8b-8192",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a video segmentation tool. Output ONLY the segment lines, nothing else."
+            },
+            {
+                "role": "user",
+                "content": f"""Split this transcript into topic segments. Output ONLY this exact format, one per line:
+SEGMENT|Topic Title|0:00|1:30
+
+Rules:
+- Start each line with SEGMENT|
+- Use pipe | to separate: SEGMENT, title, start time, end time
+- Times in M:SS format
+- Cover 100% of content with no gaps
+- No extra text at all
+
+Transcript:
+{transcript_text[:6000]}"""
+            }
+        ],
+        max_tokens=2000,
+        temperature=0.1
+    )
+    return response.choices[0].message.content
+
+
 def process_job(job_id, youtube_url, base_url):
     try:
-        # Step 1: Download video (used for both audio extraction and clip cutting)
+        # Step 1: Download video
         jobs[job_id] = {"status": "downloading", "message": "Downloading video..."}
 
-        source_path = os.path.join(os.environ.get("TEMP", "/tmp"), f"{job_id}_source.mp4")
+        source_path = os.path.join(os.environ.get("TEMP", "C:/Temp"), f"{job_id}_source.mp4")
+        os.makedirs(os.path.dirname(source_path), exist_ok=True)
+
         ydl_opts = {
             "format": "18/best[ext=mp4][height<=480]/best[height<=480]/best",
             "outtmpl": source_path,
@@ -111,10 +145,9 @@ def process_job(job_id, youtube_url, base_url):
             jobs[job_id] = {"status": "error", "error": "Video download failed"}
             return
 
-        # Step 2: Extract audio using ffmpeg
-        jobs[job_id] = {"status": "transcribing", "message": "Extracting audio for transcription..."}
-        
-        audio_path = os.path.join(os.environ.get("TEMP", "/tmp"), f"{job_id}_audio.mp3")
+        # Step 2: Extract audio
+        jobs[job_id] = {"status": "transcribing", "message": "Extracting audio..."}
+        audio_path = source_path.replace("_source.mp4", "_audio.mp3")
         cmd = [FFMPEG_PATH, "-y", "-i", source_path, "-vn", "-acodec", "mp3", "-ab", "128k", audio_path]
         subprocess.run(cmd, capture_output=True, timeout=120)
 
@@ -123,8 +156,7 @@ def process_job(job_id, youtube_url, base_url):
             return
 
         # Step 3: Transcribe with AssemblyAI
-        jobs[job_id] = {"status": "transcribing", "message": "Transcribing with AI..."}
-        
+        jobs[job_id] = {"status": "transcribing", "message": "Transcribing audio with AI..."}
         transcriber = aai.Transcriber()
         transcript = transcriber.transcribe(audio_path)
 
@@ -141,24 +173,13 @@ def process_job(job_id, youtube_url, base_url):
             jobs[job_id] = {"status": "error", "error": "Transcript is empty"}
             return
 
-        # Step 4: Segment with LeMUR
+        # Step 4: Segment with Groq
         jobs[job_id] = {"status": "segmenting", "message": "AI is splitting into topics..."}
-
-        prompt = """Split this transcript into topic segments. Output ONLY this exact format, one per line:
-SEGMENT|Topic Title|0:00|1:30
-
-Rules: start each line with SEGMENT|, use pipe | separator, times in M:SS, cover 100% of content, no extra text."""
-
-        result = transcript.lemur.task(
-            prompt=prompt,
-            final_model=aai.LemurModel.claude3_haiku,
-            max_output_size=2000
-        )
-
-        segments = parse_segments(result.response)
+        segments_text = segment_with_groq(transcript.text)
+        segments = parse_segments(segments_text)
 
         if not segments:
-            jobs[job_id] = {"status": "error", "error": "Could not parse segments", "raw": result.response[:300]}
+            jobs[job_id] = {"status": "error", "error": "Could not parse segments", "raw": segments_text[:300]}
             return
 
         # Step 5: Cut clips
@@ -202,8 +223,9 @@ Rules: start each line with SEGMENT|, use pipe | separator, times in M:SS, cover
 def health():
     return jsonify({
         "status": "ok",
-        "cookies": "loaded" if os.path.exists(COOKIES_FILE) else "missing",
         "assemblyai": "configured" if ASSEMBLYAI_KEY else "MISSING",
+        "groq": "configured" if GROQ_KEY else "MISSING",
+        "cookies": "loaded" if os.path.exists(COOKIES_FILE) else "missing",
         "ffmpeg": FFMPEG_PATH
     })
 
@@ -236,19 +258,4 @@ def start():
 def job_status(job_id):
     job = jobs.get(job_id)
     if not job:
-        return jsonify({"error": "Job not found"}), 404
-    return jsonify(job)
-
-
-@app.route("/clips/<filename>", methods=["GET"])
-def serve_clip(filename):
-    return send_from_directory(CLIPS_DIR, filename, as_attachment=False)
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"Starting ClipScholar server on port {port}")
-    print(f"AssemblyAI: {'configured' if ASSEMBLYAI_KEY else 'MISSING'}")
-    print(f"FFmpeg: {FFMPEG_PATH}")
-    print(f"Cookies: {'loaded' if os.path.exists(COOKIES_FILE) else 'missing'}")
-    app.run(host="0.0.0.0", port=port, threaded=True)
+        return jsonify({"error": "Job 
