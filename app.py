@@ -33,7 +33,8 @@ CORS(app)
 CLIPS_DIR = "clips"
 os.makedirs(CLIPS_DIR, exist_ok=True)
 
-FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+# Tell yt-dlp where ffmpeg is
+os.environ["PATH"] = os.path.dirname(FFMPEG_PATH) + os.pathsep + os.environ.get("PATH", "")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
@@ -91,18 +92,14 @@ def process_job(job_id, youtube_url, base_url):
         jobs[job_id] = {"status": "downloading_audio", "message": "Downloading audio for transcription..."}
         
         audio_path = os.path.join("/tmp", f"{job_id}_audio.mp3")
-        ydl_audio_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": audio_path.replace(".mp3", ""),
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "128",
-            }],
-            "quiet": True,
-            "no_warnings": True,
-        }
-        if os.path.exists(COOKIES_FILE):
+            ydl_audio_opts = {
+                "format": "bestaudio[ext=m4a]/bestaudio/best",
+                "outtmpl": audio_path.replace(".mp3", ""),
+                "quiet": True,
+                "no_warnings": True,
+                "ffmpeg_location": FFMPEG_PATH,
+            }
+                    if os.path.exists(COOKIES_FILE):
             ydl_audio_opts["cookiefile"] = COOKIES_FILE
 
         with yt_dlp.YoutubeDL(ydl_audio_opts) as ydl:
