@@ -27,14 +27,18 @@ load_env()
 ASSEMBLYAI_KEY = os.environ.get("ASSEMBLYAI_API_KEY", "")
 aai.settings.api_key = ASSEMBLYAI_KEY
 
+FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+FFMPEG_DIR = os.path.dirname(FFMPEG_PATH)
+
+# Add ffmpeg to PATH so yt-dlp can find it
+os.environ["PATH"] = FFMPEG_DIR + os.pathsep + os.environ.get("PATH", "")
+
 app = Flask(__name__)
 CORS(app)
 
 CLIPS_DIR = "clips"
 os.makedirs(CLIPS_DIR, exist_ok=True)
 
-# Tell yt-dlp where ffmpeg is
-os.environ["PATH"] = os.path.dirname(FFMPEG_PATH) + os.pathsep + os.environ.get("PATH", "")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
@@ -63,14 +67,12 @@ def safe_filename(text, max_len=40):
 
 def parse_segments(text):
     segments = []
-    # Primary: SEGMENT|Title|0:00|1:30
     pattern1 = r"SEGMENT\|(.+?)\|([\d:]+)\|([\d:]+)"
     matches = re.findall(pattern1, text)
     if matches:
         for title, from_str, to_str in matches:
             segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
         return segments
-    # Fallback patterns
     pattern2 = r"Topic title:\s*(.+?),\s*From time:\s*([\d:]+),\s*To time:\s*([\d:]+)"
     matches = re.findall(pattern2, text)
     if matches:
@@ -88,42 +90,46 @@ def parse_segments(text):
 
 def process_job(job_id, youtube_url, base_url):
     try:
-        # Step 1: Download audio for transcription
-        jobs[job_id] = {"status": "downloading_audio", "message": "Downloading audio for transcription..."}
-        
-        audio_path = os.path.join("/tmp", f"{job_id}_audio.mp3")
-            ydl_audio_opts = {
-                "format": "bestaudio[ext=m4a]/bestaudio/best",
-                "outtmpl": audio_path.replace(".mp3", ""),
-                "quiet": True,
-                "no_warnings": True,
-                "ffmpeg_location": FFMPEG_PATH,
-            }
-                    if os.path.exists(COOKIES_FILE):
-            ydl_audio_opts["cookiefile"] = COOKIES_FILE
+        # Step 1: Download video (used for both audio extraction and clip cutting)
+        jobs[job_id] = {"status": "downloading", "message": "Downloading video..."}
 
-        with yt_dlp.YoutubeDL(ydl_audio_opts) as ydl:
+        source_path = os.path.join(os.environ.get("TEMP", "/tmp"), f"{job_id}_source.mp4")
+        ydl_opts = {
+            "format": "18/best[ext=mp4][height<=480]/best[height<=480]/best",
+            "outtmpl": source_path,
+            "quiet": True,
+            "no_warnings": True,
+            "ffmpeg_location": FFMPEG_DIR,
+        }
+        if os.path.exists(COOKIES_FILE):
+            ydl_opts["cookiefile"] = COOKIES_FILE
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([youtube_url])
 
-        # Find the downloaded audio file
-        actual_audio = None
-        for f in os.listdir("/tmp"):
-            if f.startswith(f"{job_id}_audio") and (f.endswith(".mp3") or f.endswith(".m4a") or f.endswith(".webm")):
-                actual_audio = os.path.join("/tmp", f)
-                break
-
-        if not actual_audio or not os.path.exists(actual_audio):
-            jobs[job_id] = {"status": "error", "error": "Audio download failed"}
+        if not os.path.exists(source_path):
+            jobs[job_id] = {"status": "error", "error": "Video download failed"}
             return
 
-        # Step 2: Transcribe with AssemblyAI
-        jobs[job_id] = {"status": "transcribing", "message": "Transcribing audio with AI..."}
+        # Step 2: Extract audio using ffmpeg
+        jobs[job_id] = {"status": "transcribing", "message": "Extracting audio for transcription..."}
+        
+        audio_path = os.path.join(os.environ.get("TEMP", "/tmp"), f"{job_id}_audio.mp3")
+        cmd = [FFMPEG_PATH, "-y", "-i", source_path, "-vn", "-acodec", "mp3", "-ab", "128k", audio_path]
+        subprocess.run(cmd, capture_output=True, timeout=120)
+
+        if not os.path.exists(audio_path):
+            jobs[job_id] = {"status": "error", "error": "Audio extraction failed"}
+            return
+
+        # Step 3: Transcribe with AssemblyAI
+        jobs[job_id] = {"status": "transcribing", "message": "Transcribing with AI..."}
         
         transcriber = aai.Transcriber()
-        transcript = transcriber.transcribe(actual_audio)
-        
+        transcript = transcriber.transcribe(audio_path)
+
         try:
-            os.remove(actual_audio)
+            os.remove(audio_path)
         except OSError:
             pass
 
@@ -131,44 +137,118 @@ def process_job(job_id, youtube_url, base_url):
             jobs[job_id] = {"status": "error", "error": f"Transcription failed: {transcript.error}"}
             return
 
-        transcript_text = transcript.text
-        if not transcript_text:
+        if not transcript.text:
             jobs[job_id] = {"status": "error", "error": "Transcript is empty"}
             return
 
-        # Step 3: Segment with AI using LeMUR
-        jobs[job_id] = {"status": "segmenting", "message": "AI is analyzing and splitting into topics..."}
-        
-        prompt = """You are a video segmentation tool. Split this transcript into topic segments.
+        # Step 4: Segment with LeMUR
+        jobs[job_id] = {"status": "segmenting", "message": "AI is splitting into topics..."}
 
-Output ONLY this exact format for each segment, one per line, nothing else:
-SEGMENT|Topic Title Here|0:00|1:30
+        prompt = """Split this transcript into topic segments. Output ONLY this exact format, one per line:
+SEGMENT|Topic Title|0:00|1:30
 
-Rules:
-- Start each line with SEGMENT|
-- Use pipe | to separate the 4 fields: SEGMENT, title, start time, end time
-- Times in M:SS format
-- Cover 100% of the video content with no gaps
-- No extra text, no numbering, no summaries"""
+Rules: start each line with SEGMENT|, use pipe | separator, times in M:SS, cover 100% of content, no extra text."""
 
         result = transcript.lemur.task(
             prompt=prompt,
             final_model=aai.LemurModel.claude3_haiku,
             max_output_size=2000
         )
-        
+
         segments = parse_segments(result.response)
 
         if not segments:
             jobs[job_id] = {"status": "error", "error": "Could not parse segments", "raw": result.response[:300]}
             return
 
-        # Step 4: Download video for cutting
-        jobs[job_id] = {"status": "downloading_video", "message": f"Downloading video to cut {len(segments)} clips..."}
-        
-        source_path = os.path.join("/tmp", f"{job_id}_source.mp4")
-        ydl_opts = {
-            "format": "18/best[ext=mp4][height<=480]/best[height<=480]/best",
-            "outtmpl": source_path,
-            "quiet": True,
-            "no_warn
+        # Step 5: Cut clips
+        jobs[job_id] = {"status": "cutting", "message": f"Cutting {len(segments)} clips..."}
+        clips = []
+
+        for i, seg in enumerate(segments):
+            title = seg["title"]
+            start = time_to_seconds(seg["from"])
+            end = time_to_seconds(seg["to"])
+            duration = max(end - start, 0.5)
+
+            clip_filename = f"{job_id}_{i+1}_{safe_filename(title)}.mp4"
+            clip_path = os.path.join(CLIPS_DIR, clip_filename)
+
+            cmd = [FFMPEG_PATH, "-y", "-ss", str(start), "-i", source_path,
+                   "-t", str(duration), "-c:v", "libx264", "-c:a", "aac",
+                   "-preset", "veryfast", clip_path]
+            subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+            if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
+                clips.append({
+                    "title": title,
+                    "from": seg["from"],
+                    "to": seg["to"],
+                    "url": f"{base_url}/clips/{clip_filename}"
+                })
+
+        try:
+            os.remove(source_path)
+        except OSError:
+            pass
+
+        jobs[job_id] = {"status": "done", "clips": clips}
+
+    except Exception as e:
+        jobs[job_id] = {"status": "error", "error": str(e)}
+
+
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "cookies": "loaded" if os.path.exists(COOKIES_FILE) else "missing",
+        "assemblyai": "configured" if ASSEMBLYAI_KEY else "MISSING",
+        "ffmpeg": FFMPEG_PATH
+    })
+
+
+@app.route("/start", methods=["GET", "POST"])
+def start():
+    youtube_url = (
+        request.args.get("youtube_url") or
+        request.form.get("youtube_url") or
+        (request.get_json(silent=True) or {}).get("youtube_url", "")
+    ).strip()
+
+    if not youtube_url:
+        return jsonify({"error": "youtube_url is required"}), 400
+
+    job_id = uuid.uuid4().hex[:10]
+    base_url = request.host_url.rstrip("/")
+    jobs[job_id] = {"status": "queued", "message": "Starting..."}
+
+    threading.Thread(
+        target=process_job,
+        args=(job_id, youtube_url, base_url),
+        daemon=True
+    ).start()
+
+    return jsonify({"job_id": job_id, "status": "queued"})
+
+
+@app.route("/status/<job_id>", methods=["GET"])
+def job_status(job_id):
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(job)
+
+
+@app.route("/clips/<filename>", methods=["GET"])
+def serve_clip(filename):
+    return send_from_directory(CLIPS_DIR, filename, as_attachment=False)
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Starting ClipScholar server on port {port}")
+    print(f"AssemblyAI: {'configured' if ASSEMBLYAI_KEY else 'MISSING'}")
+    print(f"FFmpeg: {FFMPEG_PATH}")
+    print(f"Cookies: {'loaded' if os.path.exists(COOKIES_FILE) else 'missing'}")
+    app.run(host="0.0.0.0", port=port, threaded=True)
