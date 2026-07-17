@@ -92,7 +92,7 @@ def parse_segments(text):
 def segment_with_groq(transcript_text):
     client = Groq(api_key=GROQ_KEY)
     response = client.chat.completions.create(
-        model="llama3-8b-8192",
+        model="llama-3.3-70b-versatile",
         messages=[
             {
                 "role": "system",
