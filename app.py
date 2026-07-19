@@ -3,6 +3,7 @@ import re
 import uuid
 import subprocess
 import threading
+import time
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -80,44 +81,57 @@ def parse_segments(text):
         for title, from_str, to_str in matches:
             segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
         return segments
-    pattern3 = r"\d+,\s*Topic:\s*(.+?),\s*From:\s*([\d:]+),\s*To:\s*([\d:]+)"
-    matches = re.findall(pattern3, text)
-    if matches:
-        for title, from_str, to_str in matches:
-            segments.append({"title": title.strip(), "from": from_str.strip(), "to": to_str.strip()})
-        return segments
     return segments
 
 
 def segment_with_groq(transcript_text):
+    """Split transcript into chunks and segment each one with Groq."""
     client = Groq(api_key=GROQ_KEY)
-    response = client.chat.completions.create(
-    model="llama-3.1-8b-instant",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a video segmentation tool. Output ONLY the segment lines, nothing else."
-            },
-            {
-                "role": "user",
-                "content": f"""Split this transcript into topic segments. Output ONLY this exact format, one per line:
-SEGMENT|Topic Title|0:00|1:30
+    
+    chunk_size = 3000
+    chunks = []
+    start = 0
+    while start < len(transcript_text):
+        chunks.append(transcript_text[start:start + chunk_size])
+        start += chunk_size
 
-Rules:
-- Start each line with SEGMENT|
-- Use pipe | to separate: SEGMENT, title, start time, end time
-- Times in M:SS format
-- Cover 100% of content with no gaps
-- No extra text at all
+    all_segments = []
+
+    for i, chunk in enumerate(chunks):
+        # Rate limit: wait between calls
+        if i > 0:
+            time.sleep(2)
+        
+        try:
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a video segmentation tool. Output ONLY segment lines in the exact format requested."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""Split this transcript into topic segments. Output ONLY this format, one per line:
+SEGMENT|Topic Title|M:SS|M:SS
+
+No extra text, no numbering, no explanations.
 
 Transcript:
-{transcript_text[:8000]}"""
-            }
-        ],
-        max_tokens=2000,
-        temperature=0.1
-    )
-    return response.choices[0].message.content
+{chunk}"""
+                    }
+                ],
+                max_tokens=500,
+                temperature=0.1
+            )
+            result = response.choices[0].message.content
+            segs = parse_segments(result)
+            all_segments.extend(segs)
+        except Exception as e:
+            print(f"Groq chunk {i} error: {e}")
+            continue
+
+    return all_segments
 
 
 def process_job(job_id, youtube_url, base_url):
@@ -125,8 +139,9 @@ def process_job(job_id, youtube_url, base_url):
         # Step 1: Download video
         jobs[job_id] = {"status": "downloading", "message": "Downloading video..."}
 
-        source_path = os.path.join(os.environ.get("TEMP", "C:/Temp"), f"{job_id}_source.mp4")
-        os.makedirs(os.path.dirname(source_path), exist_ok=True)
+        temp_dir = os.environ.get("TEMP", "C:/Temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        source_path = os.path.join(temp_dir, f"{job_id}_source.mp4")
 
         ydl_opts = {
             "format": "18/best[ext=mp4][height<=480]/best[height<=480]/best",
@@ -147,15 +162,15 @@ def process_job(job_id, youtube_url, base_url):
 
         # Step 2: Extract audio
         jobs[job_id] = {"status": "transcribing", "message": "Extracting audio..."}
-        audio_path = source_path.replace("_source.mp4", "_audio.mp3")
+        audio_path = os.path.join(temp_dir, f"{job_id}_audio.mp3")
         cmd = [FFMPEG_PATH, "-y", "-i", source_path, "-vn", "-acodec", "mp3", "-ab", "128k", audio_path]
-        subprocess.run(cmd, capture_output=True, timeout=120)
+        subprocess.run(cmd, capture_output=True, timeout=300)
 
         if not os.path.exists(audio_path):
             jobs[job_id] = {"status": "error", "error": "Audio extraction failed"}
             return
 
-        # Step 3: Transcribe with AssemblyAI
+        # Step 3: Transcribe
         jobs[job_id] = {"status": "transcribing", "message": "Transcribing audio with AI..."}
         transcriber = aai.Transcriber()
         transcript = transcriber.transcribe(audio_path)
@@ -173,13 +188,12 @@ def process_job(job_id, youtube_url, base_url):
             jobs[job_id] = {"status": "error", "error": "Transcript is empty"}
             return
 
-        # Step 4: Segment with Groq
+        # Step 4: Segment with Groq (chunked for long videos)
         jobs[job_id] = {"status": "segmenting", "message": "AI is splitting into topics..."}
-        segments_text = segment_with_groq(transcript.text)
-        segments = parse_segments(segments_text)
+        segments = segment_with_groq(transcript.text)
 
         if not segments:
-            jobs[job_id] = {"status": "error", "error": "Could not parse segments", "raw": segments_text[:300]}
+            jobs[job_id] = {"status": "error", "error": "Could not generate segments"}
             return
 
         # Step 5: Cut clips
@@ -225,8 +239,7 @@ def health():
         "status": "ok",
         "assemblyai": "configured" if ASSEMBLYAI_KEY else "MISSING",
         "groq": "configured" if GROQ_KEY else "MISSING",
-        "cookies": "loaded" if os.path.exists(COOKIES_FILE) else "missing",
-        "ffmpeg": FFMPEG_PATH
+        "cookies": "loaded" if os.path.exists(COOKIES_FILE) else "missing"
     })
 
 
@@ -258,4 +271,19 @@ def start():
 def job_status(job_id):
     job = jobs.get(job_id)
     if not job:
-        return jsonify({"error": "Job 
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(job)
+
+
+@app.route("/clips/<filename>", methods=["GET"])
+def serve_clip(filename):
+    return send_from_directory(CLIPS_DIR, filename, as_attachment=False)
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Starting ClipScholar server on port {port}")
+    print(f"AssemblyAI: {'configured' if ASSEMBLYAI_KEY else 'MISSING'}")
+    print(f"Groq: {'configured' if GROQ_KEY else 'MISSING'}")
+    print(f"Cookies: {'loaded' if os.path.exists(COOKIES_FILE) else 'missing'}")
+    app.run(host="0.0.0.0", port=port, threaded=True)
