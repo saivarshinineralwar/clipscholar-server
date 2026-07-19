@@ -111,7 +111,7 @@ Rules:
 - No extra text at all
 
 Transcript:
-{transcript_text[:6000]}"""
+{transcript_text[:20000]}"""
             }
         ],
         max_tokens=2000,
