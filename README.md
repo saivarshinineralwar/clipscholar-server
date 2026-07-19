@@ -1,43 +1,34 @@
-# ClipScholar Video Cutter
+ClipScholar is an AI-powered tool that converts any long YouTube video into a series of short topic-based clips. A student simply pastes a YouTube link, and the app automatically transcribes the entire video, identifies each topic, and cuts one short clip per topic — so students can study every part of the video in focused, bite-sized pieces without missing a single concept."
+# ClipScholar ✂️
 
-A tiny server that takes a YouTube link plus AI-generated topic segments,
-downloads the video (yt-dlp), cuts one clip per topic (ffmpeg), and returns
-download links for each clip.
+ClipScholar is an AI-powered tool that converts any long YouTube video into a series of short topic-based clips. A student simply pastes a YouTube link, and the app automatically transcribes the entire video, identifies each topic, and cuts one short clip per topic — so students can study every part of the video in focused, bite-sized pieces without missing a single concept.
 
-## Endpoint
+## Live Demo
+👉 https://saivarshinineralwar.github.io/clipscholar
 
-`POST /process`
+## How It Works
+1. Student pastes any YouTube URL
+2. App downloads the video automatically
+3. AssemblyAI transcribes the entire audio
+4. Groq LLaMA AI identifies topics and timestamps
+5. ffmpeg cuts one short clip per topic
+6. Student watches all clips in order — 100% of content covered
 
-Body (send EITHER `segments_text` raw from the AI, OR a structured `segments` list):
+## Tech Stack
+- **Frontend:** HTML, CSS, JavaScript — hosted on GitHub Pages
+- **Backend:** Python, Flask
+- **Video Download:** yt-dlp
+- **Transcription:** AssemblyAI
+- **AI Segmentation:** Groq LLaMA 3.1
+- **Video Cutting:** ffmpeg
+- **Tunneling:** ngrok
 
-```json
-{
-  "youtube_url": "https://www.youtube.com/watch?v=VIDEO_ID",
-  "segments_text": "Segment 1, Topic title: Introduction, From time: 0:00, To time: 1:30, Summary: ...\nSegment 2, Topic title: Supply and Demand, From time: 1:30, To time: 5:45, Summary: ..."
-}
-```
+## Features
+- Fully automatic — no manual work required
+- Covers 100% of video content — nothing missed
+- Works with any YouTube video length
+- Watch clips inline or download each one
+- Clean, dark-themed UI
 
-Response:
-
-```json
-{
-  "job_id": "abc123",
-  "clips": [
-    {"title": "Introduction", "from": "0:00", "to": "1:30", "url": "https://yourserver.onrender.com/clips/abc123_1_Introduction.mp4"},
-    {"title": "Supply and Demand", "from": "1:30", "to": "5:45", "url": "https://yourserver.onrender.com/clips/abc123_2_Supply_and_Demand.mp4"}
-  ]
-}
-```
-
-## Deploying on Render (free tier)
-
-1. Push this folder to a new GitHub repo.
-2. On Render.com, click "New +" -> "Web Service" -> connect the repo.
-3. Environment: Python 3
-4. Build command: `pip install -r requirements.txt`
-5. Start command: `gunicorn app:app --bind 0.0.0.0:$PORT --timeout 600`
-6. Deploy. Render gives you a live URL like `https://clipscholar-server.onrender.com`
-
-Note: the free tier "spins down" after inactivity and takes ~30-60 seconds
-to wake up on the first request after idling. This is fine for a
-"Processing..." status flow.
+## Built By
+Sai Varshini — built from scratch in a few weeks as a personal project.
