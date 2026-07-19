@@ -92,7 +92,7 @@ def parse_segments(text):
 def segment_with_groq(transcript_text):
     client = Groq(api_key=GROQ_KEY)
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="llama3-groq-8b-8192-tool-use-preview",,
         messages=[
             {
                 "role": "system",
@@ -111,7 +111,7 @@ Rules:
 - No extra text at all
 
 Transcript:
-{transcript_text[:20000]}"""
+{transcript_text[:8000]}"""
             }
         ],
         max_tokens=2000,
